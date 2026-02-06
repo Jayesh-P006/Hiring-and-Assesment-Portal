@@ -9,12 +9,20 @@ import string
 from dotenv import load_dotenv
 from face_recognition_engine import FaceRecognition
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+
+# ── Resume uploads ──────────────────────────────────────────────────
+UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads", "resumes")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+ALLOWED_RESUME_EXTENSIONS = {"pdf", "doc", "docx"}
+MAX_RESUME_SIZE = 5 * 1024 * 1024  # 5 MB
+app.config["MAX_CONTENT_LENGTH"] = MAX_RESUME_SIZE
 
 # ── Mail configuration ──────────────────────────────────────────────
 app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
@@ -71,6 +79,16 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'candidate'")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Add resume columns
+    for col_sql in [
+        "ALTER TABLE users ADD COLUMN resume_filename TEXT",
+        "ALTER TABLE users ADD COLUMN resume_original_name TEXT",
+        "ALTER TABLE users ADD COLUMN resume_uploaded_at TIMESTAMP",
+    ]:
+        try:
+            c.execute(col_sql)
+        except sqlite3.OperationalError:
+            pass
     c.execute('''CREATE TABLE IF NOT EXISTS otp_codes
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   email TEXT NOT NULL,
@@ -1357,6 +1375,120 @@ def generate_report():
         conn.commit()
         conn.close()
         return jsonify({"ok": True, "report": report}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+# ── Resume Upload / Download / Delete ─────────────────────────────
+
+def _allowed_resume(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_RESUME_EXTENSIONS
+
+
+@app.route('/api/candidate/resume', methods=['POST'])
+def upload_resume():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    if 'resume' not in request.files:
+        return jsonify({"message": "No file uploaded"}), 400
+    file = request.files['resume']
+    if file.filename == '':
+        return jsonify({"message": "Empty filename"}), 400
+    if not _allowed_resume(file.filename):
+        return jsonify({"message": "Only PDF, DOC, DOCX files are allowed"}), 400
+    try:
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        safe_name = f"resume_{user_id}_{int(datetime.utcnow().timestamp())}.{ext}"
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        # Remove old resume file if exists
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT resume_filename FROM users WHERE id = ?", (user_id,))
+        row = c.fetchone()
+        if row and row["resume_filename"]:
+            old_path = os.path.join(UPLOAD_FOLDER, row["resume_filename"])
+            if os.path.exists(old_path):
+                os.remove(old_path)
+        # Save new file
+        file.save(filepath)
+        now = datetime.utcnow().isoformat()
+        c.execute(
+            "UPDATE users SET resume_filename = ?, resume_original_name = ?, resume_uploaded_at = ? WHERE id = ?",
+            (safe_name, file.filename, now, user_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({
+            "ok": True,
+            "resume": {"filename": safe_name, "original_name": file.filename, "uploaded_at": now},
+        }), 200
+    except Exception as e:
+        return jsonify({"message": f"Upload failed: {str(e)}"}), 500
+
+
+@app.route('/api/candidate/resume', methods=['GET'])
+def get_resume_info():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT resume_filename, resume_original_name, resume_uploaded_at FROM users WHERE id = ?", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row or not row["resume_filename"]:
+            return jsonify({"resume": None}), 200
+        return jsonify({"resume": {
+            "filename": row["resume_filename"],
+            "original_name": row["resume_original_name"],
+            "uploaded_at": row["resume_uploaded_at"],
+        }}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/api/candidate/resume/download', methods=['GET'])
+def download_resume():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT resume_filename, resume_original_name FROM users WHERE id = ?", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row or not row["resume_filename"]:
+            return jsonify({"message": "No resume found"}), 404
+        filepath = os.path.join(UPLOAD_FOLDER, row["resume_filename"])
+        if not os.path.exists(filepath):
+            return jsonify({"message": "Resume file missing"}), 404
+        from flask import send_file
+        return send_file(filepath, as_attachment=True, download_name=row["resume_original_name"])
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/api/candidate/resume', methods=['DELETE'])
+def delete_resume():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT resume_filename FROM users WHERE id = ?", (user_id,))
+        row = c.fetchone()
+        if row and row["resume_filename"]:
+            old_path = os.path.join(UPLOAD_FOLDER, row["resume_filename"])
+            if os.path.exists(old_path):
+                os.remove(old_path)
+        c.execute("UPDATE users SET resume_filename = NULL, resume_original_name = NULL, resume_uploaded_at = NULL WHERE id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True}), 200
     except Exception as e:
         return jsonify({"message": f"Server error: {str(e)}"}), 500
 

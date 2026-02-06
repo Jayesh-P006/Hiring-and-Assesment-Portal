@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   User,
   Mail,
@@ -12,6 +13,13 @@ import {
   Shield,
   Zap,
   Target,
+  Upload,
+  FileText,
+  Download,
+  Trash2,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
 } from "lucide-react";
 import PortalLayout from "@/components/PortalLayout";
 import { useUser } from "@/hooks/use-auth";
@@ -23,8 +31,84 @@ type ApplicationsResponse = {
   applications: Array<{ id: number; status: string; job_title?: string | null }>;
 };
 
+type ResumeInfo = {
+  filename: string;
+  original_name: string;
+  uploaded_at: string;
+} | null;
+
 export default function CandidateProfileSection() {
   const { data: user } = useUser();
+  const queryClient = useQueryClient();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Resume info query
+  const { data: resumeData } = useQuery({
+    queryKey: ["/api/candidate/resume"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/candidate/resume"), { credentials: "include" });
+      if (!res.ok) return { resume: null };
+      return (await res.json()) as { resume: ResumeInfo };
+    },
+  });
+
+  const resume = resumeData?.resume ?? null;
+
+  // Upload mutation
+  const uploadMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("resume", file);
+      const res = await fetch(apiUrl("/api/candidate/resume"), {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.message || "Upload failed");
+      return json;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/candidate/resume"] });
+      setUploadError(null);
+    },
+    onError: (err: Error) => {
+      setUploadError(err.message);
+    },
+  });
+
+  // Delete mutation
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/candidate/resume"), {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Delete failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/candidate/resume"] });
+    },
+  });
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError(null);
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (!["pdf", "doc", "docx"].includes(ext || "")) {
+      setUploadError("Only PDF, DOC, DOCX files are allowed");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setUploadError("File size must be under 5 MB");
+      return;
+    }
+    uploadMutation.mutate(file);
+    // Reset input so same file can be re-selected
+    e.target.value = "";
+  };
 
   const { data: appsData } = useQuery({
     queryKey: ["/api/candidate/applications"],
@@ -41,6 +125,7 @@ export default function CandidateProfileSection() {
     { label: "Username", done: !!user?.username },
     { label: "Email", done: !!user?.email },
     { label: "Face ID", done: !!(user as any)?.faceEmbedding },
+    { label: "Resume", done: !!resume },
   ];
   const completion = Math.round(
     (completionItems.filter((c) => c.done).length / completionItems.length) * 100
@@ -186,6 +271,90 @@ export default function CandidateProfileSection() {
                 <span className="text-muted-foreground flex-1">Role</span>
                 <span className="text-secondary">Candidate</span>
               </div>
+            </div>
+
+            {/* Resume */}
+            <div className="border-t border-white/5 pt-4 mb-4">
+              <div className="flex items-center justify-between mb-3">
+                <p className="font-mono text-[10px] text-muted-foreground tracking-wider">RESUME</p>
+                {resume && (
+                  <span className="flex items-center gap-1 text-[10px] font-mono text-emerald-400">
+                    <CheckCircle2 className="w-3 h-3" /> Uploaded
+                  </span>
+                )}
+              </div>
+
+              {resume ? (
+                <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center shrink-0">
+                      <FileText className="w-4 h-4 text-blue-400" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-mono text-xs text-foreground truncate">{resume.original_name}</p>
+                      <p className="font-mono text-[10px] text-muted-foreground">
+                        {resume.uploaded_at ? new Date(resume.uploaded_at).toLocaleDateString() : ""}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mt-3">
+                    <a
+                      href={apiUrl("/api/candidate/resume/download")}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/10 font-mono text-[10px] text-muted-foreground hover:text-foreground hover:border-white/20 transition-all"
+                    >
+                      <Download className="w-3 h-3" /> Download
+                    </a>
+                    <button
+                      onClick={() => { fileInputRef.current?.click(); }}
+                      disabled={uploadMutation.isPending}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/10 font-mono text-[10px] text-muted-foreground hover:text-foreground hover:border-white/20 transition-all disabled:opacity-50"
+                    >
+                      <Upload className="w-3 h-3" /> Replace
+                    </button>
+                    <button
+                      onClick={() => deleteMutation.mutate()}
+                      disabled={deleteMutation.isPending}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/5 border border-red-500/20 font-mono text-[10px] text-red-400 hover:bg-red-500/10 transition-all disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3 h-3" /> Remove
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadMutation.isPending}
+                  className="w-full rounded-lg border border-dashed border-white/10 hover:border-primary/30 bg-white/[0.01] hover:bg-primary/[0.03] p-5 transition-all duration-200 group disabled:opacity-50"
+                >
+                  <div className="flex flex-col items-center gap-2">
+                    {uploadMutation.isPending ? (
+                      <Loader2 className="w-6 h-6 text-primary animate-spin" />
+                    ) : (
+                      <Upload className="w-6 h-6 text-muted-foreground group-hover:text-primary transition-colors" />
+                    )}
+                    <div className="text-center">
+                      <p className="font-mono text-xs text-foreground group-hover:text-primary transition-colors">
+                        {uploadMutation.isPending ? "Uploading..." : "Upload Resume"}
+                      </p>
+                      <p className="font-mono text-[10px] text-muted-foreground mt-0.5">PDF, DOC, DOCX · Max 5 MB</p>
+                    </div>
+                  </div>
+                </button>
+              )}
+
+              {uploadError && (
+                <div className="flex items-center gap-1.5 mt-2 text-[10px] font-mono text-red-400">
+                  <AlertCircle className="w-3 h-3" /> {uploadError}
+                </div>
+              )}
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.doc,.docx"
+                onChange={handleFileSelect}
+                className="hidden"
+              />
             </div>
 
             {/* Profile completion */}
