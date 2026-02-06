@@ -2,10 +2,64 @@ import { useUser, useLogout } from "@/hooks/use-auth";
 import { CyberCard } from "@/components/CyberCard";
 import { CyberButton } from "@/components/CyberButton";
 import { Loader2, Users, Briefcase, Building2, LogOut, ClipboardList, UserPlus } from "lucide-react";
+import { useState } from "react";
+import { apiUrl } from "@/lib/api";
 
 export default function CompanyHRDashboard() {
   const { data: user, isLoading } = useUser();
   const logout = useLogout();
+
+  const [jobTitle, setJobTitle] = useState("");
+  const [jobDescription, setJobDescription] = useState("");
+  const [skills, setSkills] = useState("react, typescript");
+  const [modules, setModules] = useState("coding, interview");
+  const [createdJobId, setCreatedJobId] = useState<number | null>(null);
+
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteStatus, setInviteStatus] = useState<string | null>(null);
+
+  const [reportCandidateId, setReportCandidateId] = useState("");
+  const [reportJson, setReportJson] = useState<string>("");
+
+  async function createJob() {
+    const res = await fetch(apiUrl("/job/create"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        title: jobTitle,
+        description: jobDescription,
+        skills: skills.split(",").map((s) => s.trim()).filter(Boolean),
+        modules: modules.split(",").map((m) => m.trim()).filter(Boolean),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.message || "Failed to create job");
+    setCreatedJobId(data.id);
+  }
+
+  async function invite() {
+    setInviteStatus(null);
+    const res = await fetch(apiUrl("/assessment/invite"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ job_id: createdJobId, candidateEmail: inviteEmail }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.message || "Failed to invite");
+    setInviteStatus(`Invite created: assessment #${data.assessmentId}`);
+  }
+
+  async function fetchReport() {
+    setReportJson("");
+    const id = Number(reportCandidateId);
+    if (!id) throw new Error("Enter candidate id");
+    const res = await fetch(apiUrl(`/candidate/${id}/report`), { credentials: "include" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.message || "Failed to fetch report");
+    setReportJson(JSON.stringify(data, null, 2));
+  }
 
   if (isLoading) {
     return (
@@ -77,17 +131,51 @@ export default function CompanyHRDashboard() {
           </div>
         </CyberCard>
 
-        {/* Recent Applications Card */}
+        {/* Job Creation Wizard (basic) */}
         <CyberCard glow="primary" className="md:col-span-2">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="font-display text-lg">RECENT APPLICATIONS</h2>
+            <h2 className="font-display text-lg">JOB CREATION WIZARD</h2>
             <ClipboardList className="text-primary" />
           </div>
-          <div className="space-y-2 font-mono text-xs md:text-sm">
-            <div className="text-center text-muted-foreground py-8">
-              <Briefcase className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p>No applications received yet.</p>
-              <p className="text-xs mt-2">Post a job to start receiving applications!</p>
+          <div className="space-y-3">
+            <div>
+              <p className="font-mono text-xs text-muted-foreground mb-1">TITLE</p>
+              <input className="w-full bg-black border border-white/10 rounded px-3 py-2" value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} />
+            </div>
+            <div>
+              <p className="font-mono text-xs text-muted-foreground mb-1">DESCRIPTION</p>
+              <textarea className="w-full bg-black border border-white/10 rounded px-3 py-2 min-h-[90px]" value={jobDescription} onChange={(e) => setJobDescription(e.target.value)} />
+            </div>
+            <div className="grid md:grid-cols-2 gap-3">
+              <div>
+                <p className="font-mono text-xs text-muted-foreground mb-1">SKILLS (comma separated)</p>
+                <input className="w-full bg-black border border-white/10 rounded px-3 py-2" value={skills} onChange={(e) => setSkills(e.target.value)} />
+              </div>
+              <div>
+                <p className="font-mono text-xs text-muted-foreground mb-1">MODULES (comma separated)</p>
+                <input className="w-full bg-black border border-white/10 rounded px-3 py-2" value={modules} onChange={(e) => setModules(e.target.value)} />
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs font-mono text-muted-foreground">Created job id: {createdJobId ?? "—"}</p>
+              <CyberButton onClick={createJob} className="gap-2">
+                <UserPlus className="w-4 h-4" /> CREATE JOB
+              </CyberButton>
+            </div>
+
+            <div className="pt-4 border-t border-white/10">
+              <p className="font-display text-sm mb-2">INVITE CANDIDATE</p>
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 bg-black border border-white/10 rounded px-3 py-2"
+                  placeholder="candidate@email.com"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                />
+                <CyberButton variant="outline" disabled={!createdJobId} onClick={invite}>INVITE</CyberButton>
+              </div>
+              {inviteStatus && <p className="text-xs font-mono text-green-500 mt-2">{inviteStatus}</p>}
+              {!createdJobId && <p className="text-xs font-mono text-yellow-500 mt-2">Create a job first.</p>}
             </div>
           </div>
         </CyberCard>
@@ -112,13 +200,30 @@ export default function CompanyHRDashboard() {
                 <span className="px-2 py-1 bg-secondary/20 border border-secondary/50 text-secondary text-xs font-mono rounded">COMPANY_HR</span>
               </div>
             </div>
-            <div className="flex justify-end items-end gap-2">
-              <CyberButton variant="outline" className="gap-2">
-                <UserPlus className="w-4 h-4" /> POST JOB
-              </CyberButton>
-              <CyberButton variant="secondary" onClick={logout} className="gap-2">
-                <LogOut className="w-4 h-4" /> SIGN OUT
-              </CyberButton>
+            <div className="flex flex-col md:items-end gap-2">
+              <div className="flex gap-2 justify-end">
+                <CyberButton variant="secondary" onClick={logout} className="gap-2">
+                  <LogOut className="w-4 h-4" /> SIGN OUT
+                </CyberButton>
+              </div>
+
+              <div className="w-full md:w-auto border border-white/10 rounded p-3 mt-2">
+                <p className="font-display text-sm mb-2">REPORT REVIEW</p>
+                <div className="flex gap-2">
+                  <input
+                    className="flex-1 bg-black border border-white/10 rounded px-3 py-2"
+                    placeholder="Candidate ID"
+                    value={reportCandidateId}
+                    onChange={(e) => setReportCandidateId(e.target.value)}
+                  />
+                  <CyberButton variant="outline" onClick={fetchReport}>FETCH</CyberButton>
+                </div>
+                {reportJson && (
+                  <pre className="mt-3 text-xs font-mono whitespace-pre-wrap max-h-[240px] overflow-auto border border-white/10 rounded p-2">
+                    {reportJson}
+                  </pre>
+                )}
+              </div>
             </div>
           </div>
         </CyberCard>

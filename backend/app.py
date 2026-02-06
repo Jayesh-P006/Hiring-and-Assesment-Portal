@@ -79,6 +79,64 @@ def init_db():
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   expires_at TIMESTAMP NOT NULL,
                   used INTEGER DEFAULT 0)''')
+
+    # ── Hiring & assessment (basic) ────────────────────────────────
+    c.execute('''CREATE TABLE IF NOT EXISTS companies
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT UNIQUE NOT NULL,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS jobs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  company_id INTEGER,
+                  created_by_user_id INTEGER,
+                  title TEXT NOT NULL,
+                  description TEXT,
+                  skills_json TEXT,
+                  modules_json TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY(company_id) REFERENCES companies(id),
+                  FOREIGN KEY(created_by_user_id) REFERENCES users(id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS assessments
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  job_id INTEGER,
+                  candidate_user_id INTEGER,
+                  invited_email TEXT,
+                  status TEXT NOT NULL DEFAULT 'Pending',
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP,
+                  FOREIGN KEY(job_id) REFERENCES jobs(id),
+                  FOREIGN KEY(candidate_user_id) REFERENCES users(id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS proctor_logs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  assessment_id INTEGER,
+                  type TEXT NOT NULL,
+                  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  payload_json TEXT,
+                  FOREIGN KEY(user_id) REFERENCES users(id),
+                  FOREIGN KEY(assessment_id) REFERENCES assessments(id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS candidate_reports
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  candidate_user_id INTEGER,
+                  assessment_id INTEGER,
+                  report_json TEXT NOT NULL,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY(candidate_user_id) REFERENCES users(id),
+                  FOREIGN KEY(assessment_id) REFERENCES assessments(id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS applications
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  candidate_user_id INTEGER NOT NULL,
+                  job_id INTEGER NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'Applied',
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE(candidate_user_id, job_id),
+                  FOREIGN KEY(candidate_user_id) REFERENCES users(id),
+                  FOREIGN KEY(job_id) REFERENCES jobs(id))''')
     conn.commit()
     conn.close()
 
@@ -86,6 +144,33 @@ init_db()
 
 face_engine = None
 face_engine_error = None
+
+
+# ── Auth helpers ───────────────────────────────────────────────────
+ALLOWED_ROLES = {"candidate", "company_admin", "company_hr"}
+
+
+def require_auth():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None, (jsonify({"message": "Unauthorized"}), 401)
+    return user_id, None
+
+
+def require_role(roles):
+    user_id, err = require_auth()
+    if err:
+        return None, err
+    role = session.get("role")
+    if role not in roles:
+        return None, (jsonify({"message": "Forbidden"}), 403)
+    return user_id, None
+
+
+def db_connect():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def get_face_engine():
@@ -890,6 +975,398 @@ def admin_delete_face(user_id):
             'success': False,
             'message': f'Server error: {str(e)}'
         }), 500
+
+
+@app.route('/admin/db-users', methods=['GET'])
+def admin_db_users():
+    user_id, err = require_role({"company_admin"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, username, email, role, created_at FROM users ORDER BY created_at DESC LIMIT 200"
+        )
+        items = [dict(row) for row in c.fetchall()]
+        conn.close()
+        return jsonify({"users": items}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+# ── Hiring & assessment APIs (basic) ───────────────────────────────
+@app.route('/admin/create-company', methods=['POST'])
+def create_company():
+    user_id, err = require_role({"company_admin"})
+    if err:
+        return err
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"message": "Missing company name"}), 400
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("INSERT INTO companies (name) VALUES (?)", (name,))
+        conn.commit()
+        company_id = c.lastrowid
+        conn.close()
+        return jsonify({"id": company_id, "name": name, "created_by": user_id}), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"message": "Company already exists"}), 400
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/admin/stats', methods=['GET'])
+def admin_stats():
+    user_id, err = require_role({"company_admin"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) AS n FROM companies")
+        companies = int(c.fetchone()["n"])
+        c.execute("SELECT COUNT(*) AS n FROM jobs")
+        jobs = int(c.fetchone()["n"])
+        c.execute("SELECT COUNT(*) AS n FROM assessments")
+        assessments = int(c.fetchone()["n"])
+        c.execute("SELECT COUNT(*) AS n FROM proctor_logs")
+        proctor_events = int(c.fetchone()["n"])
+        conn.close()
+        return jsonify({
+            "companies": companies,
+            "jobs": jobs,
+            "assessments": assessments,
+            "proctor_events": proctor_events,
+            "server_health": "ok",
+        }), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/job/create', methods=['POST'])
+def create_job():
+    user_id, err = require_role({"company_admin", "company_hr"})
+    if err:
+        return err
+    data = request.json or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"message": "Missing job title"}), 400
+    description = (data.get("description") or "").strip()
+    skills = data.get("skills") or []
+    modules = data.get("modules") or []
+    company_id = data.get("company_id")
+    try:
+        skills_json = json.dumps(skills)
+        modules_json = json.dumps(modules)
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO jobs (company_id, created_by_user_id, title, description, skills_json, modules_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (company_id, user_id, title, description, skills_json, modules_json),
+        )
+        conn.commit()
+        job_id = c.lastrowid
+        conn.close()
+        return jsonify({
+            "id": job_id,
+            "title": title,
+            "description": description,
+            "skills": skills,
+            "modules": modules,
+        }), 201
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/assessment/invite', methods=['POST'])
+def invite_assessment():
+    user_id, err = require_role({"company_admin", "company_hr"})
+    if err:
+        return err
+    data = request.json or {}
+    job_id = data.get("job_id")
+    candidate_email = (data.get("candidateEmail") or data.get("email") or "").strip().lower()
+    if not job_id or not candidate_email:
+        return jsonify({"message": "Missing job_id or candidateEmail"}), 400
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE email = ?", (candidate_email,))
+        row = c.fetchone()
+        candidate_user_id = int(row["id"]) if row else None
+
+        c.execute(
+            "INSERT INTO assessments (job_id, candidate_user_id, invited_email, status, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (job_id, candidate_user_id, candidate_email, "Assessment Sent", datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        assessment_id = c.lastrowid
+        conn.close()
+        return jsonify({
+            "message": "Assessment invite created",
+            "assessmentId": assessment_id,
+            "jobId": job_id,
+            "candidateEmail": candidate_email,
+        }), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/api/candidate/assessments', methods=['GET'])
+def list_candidate_assessments():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            "SELECT a.id, a.status, a.created_at, j.title as job_title FROM assessments a LEFT JOIN jobs j ON a.job_id = j.id WHERE a.candidate_user_id = ? OR a.invited_email = (SELECT email FROM users WHERE id = ?) ORDER BY a.created_at DESC",
+            (user_id, user_id),
+        )
+        items = [dict(row) for row in c.fetchall()]
+        conn.close()
+        return jsonify({"assessments": items}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/api/candidate/jobs', methods=['GET'])
+def list_candidate_jobs():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT j.id, j.title, j.description, j.skills_json, j.created_at,
+                   c.name AS company_name
+            FROM jobs j
+            LEFT JOIN companies c ON j.company_id = c.id
+            ORDER BY j.created_at DESC
+            LIMIT 50
+            """
+        )
+        rows = []
+        for row in c.fetchall():
+            item = dict(row)
+            try:
+                item["skills"] = json.loads(item.get("skills_json") or "[]")
+            except Exception:
+                item["skills"] = []
+            item.pop("skills_json", None)
+            rows.append(item)
+        conn.close()
+        return jsonify({"jobs": rows}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/api/candidate/apply', methods=['POST'])
+def candidate_apply_job():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    data = request.json or {}
+    job_id = data.get("job_id")
+    if not job_id:
+        return jsonify({"message": "Missing job_id"}), 400
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO applications (candidate_user_id, job_id, status) VALUES (?, ?, ?)",
+            (user_id, job_id, "Applied"),
+        )
+        conn.commit()
+        app_id = c.lastrowid
+        conn.close()
+        return jsonify({"id": app_id, "job_id": job_id, "status": "Applied"}), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"message": "Already applied"}), 400
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/api/candidate/applications', methods=['GET'])
+def list_candidate_applications():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT a.id, a.status, a.created_at,
+                   j.id AS job_id, j.title AS job_title,
+                   c.name AS company_name
+            FROM applications a
+            LEFT JOIN jobs j ON a.job_id = j.id
+            LEFT JOIN companies c ON j.company_id = c.id
+            WHERE a.candidate_user_id = ?
+            ORDER BY a.created_at DESC
+            LIMIT 100
+            """,
+            (user_id,),
+        )
+        items = [dict(row) for row in c.fetchall()]
+        conn.close()
+        return jsonify({"applications": items}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/candidate/<int:candidate_id>/report', methods=['GET'])
+def get_candidate_report(candidate_id):
+    user_id, err = require_role({"company_admin", "company_hr"})
+    if err:
+        return err
+    assessment_id = request.args.get("assessmentId")
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        if assessment_id:
+            c.execute(
+                "SELECT report_json, created_at FROM candidate_reports WHERE candidate_user_id = ? AND assessment_id = ? ORDER BY created_at DESC LIMIT 1",
+                (candidate_id, assessment_id),
+            )
+        else:
+            c.execute(
+                "SELECT report_json, created_at FROM candidate_reports WHERE candidate_user_id = ? ORDER BY created_at DESC LIMIT 1",
+                (candidate_id,),
+            )
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({
+                "candidateId": candidate_id,
+                "report": None,
+                "message": "No report available yet",
+            }), 200
+        return jsonify({
+            "candidateId": candidate_id,
+            "report": json.loads(row["report_json"]),
+            "createdAt": row["created_at"],
+        }), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/proctor/log', methods=['POST'])
+def proctor_log():
+    user_id, err = require_auth()
+    if err:
+        return err
+    data = request.json or {}
+    event_type = (data.get("type") or "").strip()
+    if not event_type:
+        return jsonify({"message": "Missing type"}), 400
+    assessment_id = data.get("assessmentId")
+    payload = data.get("payload")
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO proctor_logs (user_id, assessment_id, type, payload_json) VALUES (?, ?, ?, ?)",
+            (user_id, assessment_id, event_type, json.dumps(payload) if payload is not None else None),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/code/execute', methods=['POST'])
+def code_execute():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    # Intentionally disabled for safety in this basic implementation.
+    return jsonify({
+        "stdout": "",
+        "stderr": "Code execution is disabled in this basic backend implementation.",
+        "exitCode": 1,
+    }), 200
+
+
+@app.route('/code/analyze', methods=['POST'])
+def code_analyze():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    data = request.json or {}
+    code = data.get("code") or ""
+    language = (data.get("language") or "").strip() or "unknown"
+    lines = len([ln for ln in code.splitlines() if ln.strip()])
+    # Basic heuristic score; replace with your model integration later.
+    score = max(0, min(100, 30 + min(70, lines)))
+    return jsonify({
+        "issues": [],
+        "complexity": "N/A",
+        "score": int(score),
+        "language": language,
+        "lines": lines,
+    }), 200
+
+
+@app.route('/api/v1/generate-report', methods=['POST'])
+def generate_report():
+    user_id, err = require_role({"candidate"})
+    if err:
+        return err
+    data = request.json or {}
+    candidate_id = data.get("candidateId")
+    assessment_id = data.get("assessmentId")
+    if not candidate_id or not assessment_id:
+        return jsonify({"message": "Missing candidateId or assessmentId"}), 400
+    # Candidate can only generate their own report.
+    if str(candidate_id) != str(user_id):
+        return jsonify({"message": "Forbidden"}), 403
+
+    report = {
+        "candidateId": candidate_id,
+        "assessmentId": assessment_id,
+        "codeSnapshot": data.get("codeSnapshot"),
+        "browserLogs": data.get("browserLogs") or [],
+        "audioTranscript": data.get("audioTranscript") or "",
+        "generatedAt": datetime.utcnow().isoformat() + "Z",
+        "summary": "Basic report generated (model integration pending).",
+    }
+
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO candidate_reports (candidate_user_id, assessment_id, report_json) VALUES (?, ?, ?)",
+            (user_id, assessment_id, json.dumps(report)),
+        )
+        # Update assessment status if it exists.
+        c.execute(
+            "UPDATE assessments SET status = ?, updated_at = ? WHERE id = ?",
+            ("Completed", datetime.utcnow().isoformat(), assessment_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "report": report}), 200
+    except Exception as e:
+        return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@app.route('/interview/stream', methods=['GET', 'POST'])
+def interview_stream_placeholder():
+    # Placeholder: Planning.md specifies WebSocket; implement with flask-socketio later.
+    return jsonify({
+        "message": "WebSocket streaming not implemented in this basic backend."
+    }), 501
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", "5000"))

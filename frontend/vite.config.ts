@@ -33,6 +33,34 @@ export default defineConfig(async () => {
           target: "http://localhost:5000",
           changeOrigin: true,
         },
+        "/admin": {
+          target: "http://localhost:5000",
+          changeOrigin: true,
+        },
+        "/job": {
+          target: "http://localhost:5000",
+          changeOrigin: true,
+        },
+        "/assessment": {
+          target: "http://localhost:5000",
+          changeOrigin: true,
+        },
+        "/candidate": {
+          target: "http://localhost:5000",
+          changeOrigin: true,
+        },
+        "/proctor": {
+          target: "http://localhost:5000",
+          changeOrigin: true,
+        },
+        "/code": {
+          target: "http://localhost:5000",
+          changeOrigin: true,
+        },
+        "/interview": {
+          target: "http://localhost:5000",
+          changeOrigin: true,
+        },
       },
       fs: {
         strict: true,

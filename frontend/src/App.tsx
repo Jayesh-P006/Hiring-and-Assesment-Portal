@@ -10,6 +10,14 @@ import FaceLogin from "@/pages/FaceLogin";
 import ForgotPassword from "@/pages/ForgotPassword";
 import Dashboard from "@/pages/Dashboard";
 import { CandidateDashboard, CompanyHRDashboard, CompanyAdminDashboard } from "@/pages/dashboards";
+import Lobby from "@/pages/candidate/Lobby";
+import CodingAssessment from "@/pages/candidate/CodingAssessment";
+import InterviewAssessment from "@/pages/candidate/InterviewAssessment";
+import CandidateProfileSection from "@/pages/candidate/sections/Profile";
+import CandidateJobPostsSection from "@/pages/candidate/sections/JobPosts";
+import CandidateAIInterviewSection from "@/pages/candidate/sections/AIInterview";
+import CandidatePracticeSection from "@/pages/candidate/sections/PracticeQuestions";
+import CandidateTrackSection from "@/pages/candidate/sections/TrackApplications";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -21,9 +29,17 @@ function Router() {
       <Route path="/register" component={Register} />
       <Route path="/forgot-password" component={ForgotPassword} />
       <Route path="/dashboard" component={Dashboard} />
-      <Route path="/dashboard/candidate" component={CandidateDashboard} />
+      <Route path="/dashboard/candidate" component={CandidateProfileSection} />
+      <Route path="/dashboard/candidate/profile" component={CandidateProfileSection} />
+      <Route path="/dashboard/candidate/jobs" component={CandidateJobPostsSection} />
+      <Route path="/dashboard/candidate/ai-interview" component={CandidateAIInterviewSection} />
+      <Route path="/dashboard/candidate/practice" component={CandidatePracticeSection} />
+      <Route path="/dashboard/candidate/track" component={CandidateTrackSection} />
       <Route path="/dashboard/hr" component={CompanyHRDashboard} />
       <Route path="/dashboard/admin" component={CompanyAdminDashboard} />
+      <Route path="/candidate/lobby" component={Lobby} />
+      <Route path="/candidate/assessment/:id/coding" component={CodingAssessment} />
+      <Route path="/candidate/assessment/:id/interview" component={InterviewAssessment} />
       <Route component={NotFound} />
     </Switch>
   );

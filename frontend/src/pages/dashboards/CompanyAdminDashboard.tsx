@@ -1,11 +1,114 @@
 import { useUser, useLogout } from "@/hooks/use-auth";
 import { CyberCard } from "@/components/CyberCard";
 import { CyberButton } from "@/components/CyberButton";
-import { Loader2, Shield, Users, Settings, LogOut, Activity, Building2 } from "lucide-react";
+import { CyberInput } from "@/components/CyberInput";
+import { Loader2, Shield, LogOut, Activity, Building2, Users, RefreshCw, Trash2, Database } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiUrl } from "@/lib/api";
 
 export default function CompanyAdminDashboard() {
   const { data: user, isLoading } = useUser();
   const logout = useLogout();
+  const queryClient = useQueryClient();
+
+  const [companyName, setCompanyName] = useState("");
+  const [companyError, setCompanyError] = useState<string | null>(null);
+
+  const { data: stats, refetch: refetchStats } = useQuery({
+    queryKey: ["/admin/stats"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/admin/stats"), { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load stats");
+      return (await res.json()) as {
+        companies: number;
+        jobs: number;
+        assessments: number;
+        proctor_events: number;
+        server_health: string;
+      };
+    },
+    enabled: !!user,
+  });
+
+  const [userSearch, setUserSearch] = useState("");
+
+  const { data: dbUsers } = useQuery({
+    queryKey: ["/admin/db-users"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/admin/db-users"), { credentials: "include" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || "Failed to load users");
+      }
+      return (await res.json()) as {
+        users: Array<{ id: number; username: string; email: string; role: string; created_at: string }>;
+      };
+    },
+    enabled: !!user,
+  });
+
+  const { data: faceUsers } = useQuery({
+    queryKey: ["/admin/users"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/admin/users?limit=100"), { credentials: "include" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.message || "Failed to load face registry");
+      return json as {
+        success: boolean;
+        users: Array<{ user_id: string; name?: string | null; registered_at?: string | null; face_status?: string | null }>;
+        next_cursor?: string | null;
+      };
+    },
+    enabled: !!user,
+    retry: false,
+  });
+
+  const deleteFaceMutation = useMutation({
+    mutationFn: async (userId: string) => {
+      const res = await fetch(apiUrl(`/admin/users/${encodeURIComponent(userId)}/face`), {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.message || "Failed to delete face");
+      return json as { success: boolean };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/admin/users"] });
+    },
+  });
+
+  const filteredDbUsers = useMemo(() => {
+    const all = dbUsers?.users ?? [];
+    const q = userSearch.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter((u) => {
+      return (
+        u.username.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q) ||
+        u.role.toLowerCase().includes(q)
+      );
+    });
+  }, [dbUsers?.users, userSearch]);
+
+  async function createCompany() {
+    setCompanyError(null);
+    const res = await fetch(apiUrl("/admin/create-company"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ name: companyName }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setCompanyError(data?.message || "Failed to create company");
+      return;
+    }
+
+    setCompanyName("");
+    void refetchStats();
+  }
 
   if (isLoading) {
     return (
@@ -77,21 +180,32 @@ export default function CompanyAdminDashboard() {
           </div>
         </CyberCard>
 
-        {/* Activity Feed Card */}
+        {/* Global Analytics (basic) */}
         <CyberCard glow="primary" className="md:col-span-2">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="font-display text-lg">ACTIVITY FEED</h2>
+            <h2 className="font-display text-lg">GLOBAL ANALYTICS</h2>
             <Activity className="text-primary" />
           </div>
-          <div className="space-y-2 font-mono text-xs md:text-sm">
-            <div className="flex gap-4 p-2 bg-primary/10 border-l-2 border-primary">
-              <span className="text-muted-foreground">NOW</span>
-              <span className="text-accent">[SYSTEM]</span>
-              <span className="text-foreground">Admin dashboard initialized successfully</span>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="border border-white/10 rounded p-4">
+              <p className="font-mono text-xs text-muted-foreground">COMPANIES</p>
+              <p className="font-display text-2xl text-primary">{stats?.companies ?? 0}</p>
             </div>
-            <div className="text-center text-muted-foreground py-4">
-              <p className="text-xs">No other recent activity</p>
+            <div className="border border-white/10 rounded p-4">
+              <p className="font-mono text-xs text-muted-foreground">JOBS</p>
+              <p className="font-display text-2xl text-primary">{stats?.jobs ?? 0}</p>
             </div>
+            <div className="border border-white/10 rounded p-4">
+              <p className="font-mono text-xs text-muted-foreground">ASSESSMENTS</p>
+              <p className="font-display text-2xl text-primary">{stats?.assessments ?? 0}</p>
+            </div>
+            <div className="border border-white/10 rounded p-4">
+              <p className="font-mono text-xs text-muted-foreground">PROCTOR EVENTS</p>
+              <p className="font-display text-2xl text-primary">{stats?.proctor_events ?? 0}</p>
+            </div>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <CyberButton variant="outline" onClick={() => refetchStats()}>REFRESH</CyberButton>
           </div>
         </CyberCard>
 
@@ -116,16 +230,134 @@ export default function CompanyAdminDashboard() {
                 <span className="px-2 py-1 bg-red-500/20 border border-red-500/50 text-red-500 text-xs font-mono rounded">FULL_ACCESS</span>
               </div>
             </div>
-            <div className="flex justify-end items-end gap-2">
-              <CyberButton variant="outline" className="gap-2">
-                <Users className="w-4 h-4" /> MANAGE HR
+            <div className="flex flex-col md:items-end gap-2">
+              <div className="flex gap-2 justify-end">
+                <CyberButton variant="secondary" onClick={logout} className="gap-2">
+                  <LogOut className="w-4 h-4" /> SIGN OUT
+                </CyberButton>
+              </div>
+
+              <div className="w-full md:w-auto border border-white/10 rounded p-3 mt-2">
+                <p className="font-display text-sm mb-2">ORGANIZATION MANAGEMENT</p>
+                <div className="flex gap-2">
+                  <CyberInput
+                    placeholder="Company name"
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                  />
+                  <CyberButton
+                    variant="outline"
+                    onClick={createCompany}
+                    disabled={!companyName.trim()}
+                  >
+                    CREATE
+                  </CyberButton>
+                </div>
+                {companyError ? (
+                  <p className="text-xs font-mono text-destructive mt-2">{companyError}</p>
+                ) : null}
+                <p className="text-xs font-mono text-muted-foreground mt-2">
+                  Role management and detailed settings are UI stubs for now.
+                </p>
+              </div>
+            </div>
+          </div>
+        </CyberCard>
+
+        {/* User Management */}
+        <CyberCard className="md:col-span-3">
+          <div className="flex items-center justify-between gap-4 mb-6">
+            <div className="flex items-center gap-4">
+              <Users className="w-8 h-8 text-primary" />
+              <div>
+                <h2 className="font-display text-xl">USER MANAGEMENT</h2>
+                <p className="text-xs font-mono text-muted-foreground">DATABASE USERS + FACE REGISTRY</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <CyberButton variant="outline" className="gap-2" onClick={() => {
+                queryClient.invalidateQueries({ queryKey: ["/admin/db-users"] });
+                queryClient.invalidateQueries({ queryKey: ["/admin/users"] });
+              }}>
+                <RefreshCw className="w-4 h-4" /> REFRESH
               </CyberButton>
-              <CyberButton variant="outline" className="gap-2">
-                <Settings className="w-4 h-4" /> SETTINGS
-              </CyberButton>
-              <CyberButton variant="secondary" onClick={logout} className="gap-2">
-                <LogOut className="w-4 h-4" /> SIGN OUT
-              </CyberButton>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="border border-white/10 rounded p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <p className="font-display text-sm flex items-center gap-2">
+                  <Database className="w-4 h-4 text-secondary" /> PLATFORM USERS
+                </p>
+                <div className="w-[220px]">
+                  <CyberInput placeholder="Search username/email/role" value={userSearch} onChange={(e) => setUserSearch(e.target.value)} />
+                </div>
+              </div>
+
+              <div className="max-h-[360px] overflow-auto border border-white/10 rounded">
+                <div className="grid grid-cols-12 gap-2 px-3 py-2 text-xs font-mono text-muted-foreground border-b border-white/10">
+                  <div className="col-span-2">ID</div>
+                  <div className="col-span-4">USERNAME</div>
+                  <div className="col-span-4">EMAIL</div>
+                  <div className="col-span-2">ROLE</div>
+                </div>
+                {(filteredDbUsers.length === 0) ? (
+                  <div className="px-3 py-6 text-center text-sm text-muted-foreground">No users found.</div>
+                ) : (
+                  filteredDbUsers.map((u) => (
+                    <div key={u.id} className="grid grid-cols-12 gap-2 px-3 py-2 text-xs font-mono border-b border-white/5">
+                      <div className="col-span-2 text-muted-foreground">{u.id}</div>
+                      <div className="col-span-4 text-primary truncate">{u.username}</div>
+                      <div className="col-span-4 text-muted-foreground truncate">{u.email}</div>
+                      <div className="col-span-2 text-secondary truncate">{u.role}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+              <p className="text-xs font-mono text-muted-foreground mt-2">
+                Role changes are not implemented yet (read-only list).
+              </p>
+            </div>
+
+            <div className="border border-white/10 rounded p-4">
+              <p className="font-display text-sm flex items-center gap-2 mb-3">
+                <Shield className="w-4 h-4 text-accent" /> FACE REGISTRY
+              </p>
+              <div className="max-h-[360px] overflow-auto border border-white/10 rounded">
+                <div className="grid grid-cols-12 gap-2 px-3 py-2 text-xs font-mono text-muted-foreground border-b border-white/10">
+                  <div className="col-span-4">USER_ID</div>
+                  <div className="col-span-4">NAME</div>
+                  <div className="col-span-2">STATUS</div>
+                  <div className="col-span-2">ACTION</div>
+                </div>
+                {(faceUsers?.users?.length ?? 0) === 0 ? (
+                  <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    {faceUsers ? "No registered faces yet." : "Face registry unavailable (missing Pinecone config)."}
+                  </div>
+                ) : (
+                  faceUsers!.users.map((fu) => (
+                    <div key={fu.user_id} className="grid grid-cols-12 gap-2 px-3 py-2 text-xs font-mono border-b border-white/5 items-center">
+                      <div className="col-span-4 text-primary truncate">{fu.user_id}</div>
+                      <div className="col-span-4 text-muted-foreground truncate">{fu.name || "—"}</div>
+                      <div className="col-span-2 text-secondary truncate">{fu.face_status || "active"}</div>
+                      <div className="col-span-2">
+                        <CyberButton
+                          variant="outline"
+                          className="gap-2"
+                          disabled={deleteFaceMutation.isPending}
+                          onClick={() => deleteFaceMutation.mutate(fu.user_id)}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </CyberButton>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              <p className="text-xs font-mono text-muted-foreground mt-2">
+                Deleting a face removes the biometric record from Pinecone.
+              </p>
             </div>
           </div>
         </CyberCard>
